@@ -116,8 +116,8 @@ def init_vlm_model(vlm_config, from_weight='llm', tokenizer_path='../model',
                    vision_model_path='../model/vision_model/clip-vit-base-patch16', 
                    save_dir='../out', device='cuda', freeze_llm=False, import_path='../out'):
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
-    model = MiniMindVLM(vlm_config, vision_model_path=vision_model_path)
-    
+    weights = None
+    weight_path = None
     if from_weight != 'none':
         moe_suffix = '_moe' if vlm_config.use_moe else ''
         weight_path = f'{import_path}/{from_weight}_{vlm_config.hidden_size}{moe_suffix}.pth'
@@ -134,21 +134,12 @@ def init_vlm_model(vlm_config, from_weight='llm', tokenizer_path='../model',
             model = model.to(device)
         weights = load_checkpoint_state_dict(weight_path, map_location=load_device)
         model.load_state_dict(weights, strict=False)
-    
-    # Pretrain阶段：冻结除 vision_proj 外的所有参数
-    if freeze_llm:
-        for name, param in model.named_parameters():
-            if 'vision_proj' not in name:
-                param.requires_grad = False
-    
-    # pretrain阶段：解冻最后1层
-    last_layer_idx = vlm_config.num_hidden_layers - 1
-    for name, param in model.model.named_parameters():
-        if f'layers.{last_layer_idx}.' in name:
-            param.requires_grad = True
+        del weights
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
-    get_model_params(model, vlm_config)
-    Logger(f'Trainable Params: {sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6:.3f}M')
+    model.vision_encoder, model.processor = MiniMindVLM.get_vision_model(vision_model_path)
     preprocess = model.processor
     return model.to(device), tokenizer, preprocess
 

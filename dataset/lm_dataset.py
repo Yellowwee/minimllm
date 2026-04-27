@@ -12,10 +12,10 @@ import pyarrow.parquet as pq
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-
+#
 class VLMDataset(Dataset):
     def __init__(self, parquet_path, tokenizer, preprocess=None, max_length=512,
-                 image_special_token='@' * 196):
+                 image_special_token='@'):
 
         super().__init__()
         self.table = pq.read_table(parquet_path)
