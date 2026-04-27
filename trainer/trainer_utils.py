@@ -65,7 +65,7 @@ def setup_seed(seed: int):
 
 def init_vlm_model(vlm_config, from_weight='pretrain_vlm', tokenizer_path='../model', 
                    vision_model_path='../model/vision_model/clip-vit-base-patch16', 
-                   save_dir='../out', device='cuda', freeze_llm=False):
+                   save_dir='../out', device='cuda', freeze_llm=False, import_path='../out'):
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
     model = MiniMindVLM(vlm_config, vision_model_path=vision_model_path)
     
