@@ -107,7 +107,7 @@ if __name__ == "__main__":
     parser.add_argument("--grad_clip", type=float, default=1.0, help="梯度裁剪阈值")
     parser.add_argument("--log_interval", type=int, default=100, help="日志打印间隔")
     parser.add_argument("--save_interval", type=int, default=1000, help="模型保存间隔")
-    parser.add_argument('--hidden_size', default=512, type=int, help="隐藏层维度")
+    parser.add_argument('--hidden_size', default=768, type=int, help="隐藏层维度")
     parser.add_argument('--num_hidden_layers', default=8, type=int, help="隐藏层数量")
     parser.add_argument('--max_seq_len', default=640, type=int, help="训练的最大截断长度")
     parser.add_argument('--use_moe', default=0, type=int, choices=[0, 1], help="是否使用MoE架构（0=否，1=是）")
@@ -118,6 +118,7 @@ if __name__ == "__main__":
     parser.add_argument("--use_compile", default=0, type=int, choices=[0, 1], help="是否使用torch.compile加速（0=否，1=是）")
     parser.add_argument("--use_wandb", action="store_true", help="是否使用wandb")
     parser.add_argument("--wandb_project", type=str, default="MiniMind-V-Pretrain", help="wandb项目名")
+    parser.add_argument("--clip_path", type=str, default="../model/vision_model/clip", help="本地or云端训练")
     args = parser.parse_args()
 
     # ========== 1. 初始化环境和随机种子 ==========
@@ -147,7 +148,7 @@ if __name__ == "__main__":
         wandb.init(project=args.wandb_project, name=wandb_run_name, id=wandb_id, resume=resume)
     
     # ========== 5. 定义模型、数据、优化器 ==========
-    model, tokenizer, preprocess = init_vlm_model(vlm_config, from_weight=args.from_weight, device=args.device, freeze_llm=bool(args.freeze_llm))
+    model, tokenizer, preprocess = init_vlm_model(vlm_config, from_weight=args.from_weight, device=args.device, freeze_llm=bool(args.freeze_llm), vision_model_path=args.clip_path)
     if args.use_compile == 1:
         model = torch.compile(model)
         Logger('torch.compile enabled')
