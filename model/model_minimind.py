@@ -3,7 +3,10 @@
 # 📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘
 
 from transformers import PretrainedConfig
-
+try:
+    from .CrossAttentionGQA import CrossAttentionGQA
+except ImportError:
+    from CrossAttentionGQA import CrossAttentionGQA
 
 class MiniMindConfig(PretrainedConfig):
     model_type = "minimind"
@@ -199,6 +202,7 @@ class Attention(nn.Module):
             scores = (xq @ xk.transpose(-2, -1)) / math.sqrt(self.head_dim)
             scores[:, :, :, -seq_len:] += torch.triu(torch.full((seq_len, seq_len), float("-inf"), device=scores.device), diagonal=1)
 
+            #惩罚pad_token
             if attention_mask is not None:
                 extended_attention_mask = attention_mask.unsqueeze(1).unsqueeze(2)
                 extended_attention_mask = (1.0 - extended_attention_mask) * -1e9
@@ -206,6 +210,9 @@ class Attention(nn.Module):
 
             scores = F.softmax(scores.float(), dim=-1).type_as(xq)
             scores = self.attn_dropout(scores)
+            #[bsz,num_heads, seq_len, seq_len]
+            #[bsz,num_heads, seq_len, head_dim]
+            #相当于计算出每head_dim加权求和后的特征
             output = scores @ xv
 
         output = output.transpose(1, 2).reshape(bsz, seq_len, -1)
@@ -356,19 +363,28 @@ class MiniMindBlock(nn.Module):
         self.hidden_size = config.hidden_size
         self.head_dim = config.hidden_size // config.num_attention_heads
         self.self_attn = Attention(config)
+        self.cross_attn = CrossAttentionGQA(self.hidden_size, self.num_attention_heads, config.num_key_value_heads)
+        self.cross_attn_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
         self.layer_id = layer_id
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.mlp = FeedForward(config) if not config.use_moe else MOEFeedForward(config)
 
-    def forward(self, hidden_states, position_embeddings, past_key_value=None, use_cache=False, attention_mask=None):
+    def forward(self, hidden_states, vision_states, position_embeddings, past_key_value=None, use_cache=False, attention_mask=None):
         residual = hidden_states
         hidden_states, present_key_value = self.self_attn(
             self.input_layernorm(hidden_states), position_embeddings,
             past_key_value, use_cache, attention_mask
         )
         hidden_states += residual
+
+        if vision_states is not None:
+            residual = hidden_states
+            #应该将text 和 image进行归一化
+            cross_out = self.cross_attn(self.cross_attn_norm(hidden_states), vision_states)
+            hidden_states = residual + cross_out
+
         hidden_states = hidden_states + self.mlp(self.post_attention_layernorm(hidden_states))
         return hidden_states, present_key_value
 
@@ -411,7 +427,8 @@ class MiniMindModel(nn.Module):
         for layer_idx, (layer, past_key_value) in enumerate(zip(self.layers, past_key_values)):
             hidden_states, present = layer(
                 hidden_states,
-                position_embeddings,
+                vision_states=None,
+                position_embeddings=position_embeddings,
                 past_key_value=past_key_value,
                 use_cache=use_cache,
                 attention_mask=attention_mask

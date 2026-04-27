@@ -17,8 +17,30 @@ from transformers import AutoTokenizer
 from model.model_vlm import MiniMindVLM, VLMConfig
 from dataset.lm_dataset import VLMDataset
 from trainer.trainer_utils import get_lr, Logger, is_main_process, init_distributed_mode, setup_seed, init_vlm_model, vlm_checkpoint, SkipBatchSampler
+from peft import get_peft_model, LoraConfig, TaskType
 
 warnings.filterwarnings('ignore')
+
+
+def freeze_for_stage2(model):
+    print("second stage: CLIP remain freezed, CrossAttention and LLM LoRA are trainable.")
+    for name, param in model.named_parameters():
+        param.requires_grad = False
+    
+    for name, param in model.named_parameters():
+        if "cross_attn"  in name or "vision_proj" in name:
+            param.requires_grad = True
+
+    lora_config = LoraConfig(
+        task_type=TaskType.CAUSAL_LM,
+        r=8,
+        lora_alpha=32,
+        lora_dropout=0.1,
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+    )
+    model = get_peft_model(model, lora_config)
+    model.print_trainable_parameters()
+    return model
 
 
 def train_epoch(epoch, loader, iters, start_step=0, wandb=None):

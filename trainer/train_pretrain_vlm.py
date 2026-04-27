@@ -21,6 +21,22 @@ from trainer.trainer_utils import get_lr, Logger, is_main_process, init_distribu
 warnings.filterwarnings('ignore')
 
 
+def freeze_stage1(model):
+    print("first stage: only train cross and vision_proj")
+    for name, param in model.named_parameters():
+        param.requires_grad = False
+
+    for name, param in model.named_parameters():
+        if "cross_attn"  in name:
+            param.requires_grad = True
+        elif "vision_proj"  in name:
+            param.requires_grad = True
+    
+    trainable_params = [n for n, p in model.named_parameters() if p.requires_grad]
+    print(f"trainable params in stage 1: {trainable_params}")
+    return model
+
+
 def train_epoch(epoch, loader, iters, start_step=0, wandb=None):
     start_time = time.time()
     for step, (input_ids, labels, pixel_values) in enumerate(loader, start=start_step + 1):
@@ -123,7 +139,8 @@ if __name__ == "__main__":
     # ========== 4. 配wandb ==========
     wandb = None
     if args.use_wandb and is_main_process():
-        import swanlab as wandb
+        import wandb
+        wandb.login(key="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")
         wandb_id = ckp_data.get('wandb_id') if ckp_data else None
         resume = 'must' if wandb_id else None
         wandb_run_name = f"MiniMind-V-Pretrain-Epoch-{args.epochs}-BatchSize-{args.batch_size}-LearningRate-{args.learning_rate}"
@@ -138,7 +155,8 @@ if __name__ == "__main__":
                           image_special_token=vlm_config.image_special_token,
                           max_length=vlm_config.max_seq_len)
     train_sampler = DistributedSampler(train_ds) if dist.is_initialized() else None
-    scaler = torch.cuda.amp.GradScaler(enabled=(args.dtype == 'float16'))
+    scaler = torch.amp.GradScaler("cuda", enabled=(args.dtype == 'float16'))
+    model = freeze_stage1(model) if args.freeze_llm == 1 else model
     optimizer = optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=args.learning_rate)
     
     # ========== 6. 从ckp恢复状态 ==========
