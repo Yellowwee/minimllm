@@ -39,6 +39,37 @@ def Logger(content):
         print(content)
 
 
+def infer_config_from_state_dict(config, state_dict):
+    layer_re = re.compile(r"^model\.layers\.(\d+)\.")
+    layer_ids = [
+        int(match.group(1))
+        for key in state_dict.keys()
+        if (match := layer_re.match(key))
+    ]
+    if layer_ids:
+        checkpoint_layers = max(layer_ids) + 1
+        if config.num_hidden_layers != checkpoint_layers:
+            Logger(f'从权重自动设置 num_hidden_layers: {config.num_hidden_layers} -> {checkpoint_layers}')
+            config.num_hidden_layers = checkpoint_layers
+
+    gate_weight = state_dict.get('model.layers.0.mlp.gate_proj.weight')
+    if gate_weight is not None:
+        checkpoint_intermediate_size = gate_weight.shape[0]
+        if config.intermediate_size != checkpoint_intermediate_size:
+            Logger(f'从权重自动设置 intermediate_size: {config.intermediate_size} -> {checkpoint_intermediate_size}')
+            config.intermediate_size = checkpoint_intermediate_size
+
+    k_proj_weight = state_dict.get('model.layers.0.self_attn.k_proj.weight')
+    if k_proj_weight is not None:
+        head_dim = config.hidden_size // config.num_attention_heads
+        if head_dim > 0 and k_proj_weight.shape[0] % head_dim == 0:
+            checkpoint_num_kv_heads = k_proj_weight.shape[0] // head_dim
+            if config.num_key_value_heads != checkpoint_num_kv_heads:
+                Logger(f'从权重自动设置 num_key_value_heads: {config.num_key_value_heads} -> {checkpoint_num_kv_heads}')
+                config.num_key_value_heads = checkpoint_num_kv_heads
+    return config
+
+
 def get_lr(current_step, total_steps, lr):
     return lr*(0.1 + 0.45*(1 + math.cos(math.pi * current_step / total_steps)))
 
@@ -63,7 +94,23 @@ def setup_seed(seed: int):
     torch.backends.cudnn.benchmark = False
 
 
-def init_vlm_model(vlm_config, from_weight='pretrain_vlm', tokenizer_path='../model', 
+def load_checkpoint_state_dict(path, map_location='cpu'):
+    load_kwargs = {'map_location': map_location}
+    try:
+        load_kwargs['weights_only'] = True
+        if map_location == 'cpu':
+            load_kwargs['mmap'] = True
+        state_dict = torch.load(path, **load_kwargs)
+    except TypeError:
+        load_kwargs.pop('weights_only', None)
+        load_kwargs.pop('mmap', None)
+        state_dict = torch.load(path, **load_kwargs)
+    if isinstance(state_dict, dict) and 'model' in state_dict:
+        state_dict = state_dict['model']
+    return state_dict
+
+
+def init_vlm_model(vlm_config, from_weight='llm', tokenizer_path='../model', 
                    vision_model_path='../model/vision_model/clip-vit-base-patch16', 
                    save_dir='../out', device='cuda', freeze_llm=False, import_path='../out'):
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
