@@ -148,7 +148,8 @@ if __name__ == "__main__":
         wandb.init(project=args.wandb_project, name=wandb_run_name, id=wandb_id, resume=resume)
     
     # ========== 5. 定义模型、数据、优化器 ==========
-    model, tokenizer, preprocess = init_vlm_model(vlm_config, from_weight=args.from_weight, device=args.device, freeze_llm=bool(args.freeze_llm), vision_model_path=args.clip_path)
+    model, tokenizer, preprocess = init_vlm_model(vlm_config, from_weight=args.from_weight, device=args.device, freeze_llm=bool(args.freeze_llm), vision_model_path=args.clip_path,
+                                                  import_path=args.import_path)
     if args.use_compile == 1:
         model = torch.compile(model)
         Logger('torch.compile enabled')

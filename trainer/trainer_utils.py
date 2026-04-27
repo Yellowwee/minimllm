@@ -71,8 +71,19 @@ def init_vlm_model(vlm_config, from_weight='pretrain_vlm', tokenizer_path='../mo
     
     if from_weight != 'none':
         moe_suffix = '_moe' if vlm_config.use_moe else ''
-        weight_path = f'{save_dir}/{from_weight}_{vlm_config.hidden_size}{moe_suffix}.pth'
-        weights = torch.load(weight_path, map_location=device)
+        weight_path = f'{import_path}/{from_weight}_{vlm_config.hidden_size}{moe_suffix}.pth'
+        meta_weights = load_checkpoint_state_dict(weight_path, map_location='meta')
+        vlm_config = infer_config_from_state_dict(vlm_config, meta_weights)
+        del meta_weights
+        gc.collect()
+
+    model = MiniMindVLM(vlm_config, vision_model_path='')
+    
+    if weight_path is not None:
+        load_device = device if 'cuda' in str(device) else 'cpu'
+        if load_device != 'cpu':
+            model = model.to(device)
+        weights = load_checkpoint_state_dict(weight_path, map_location=load_device)
         model.load_state_dict(weights, strict=False)
     
     # Pretrain阶段：冻结除 vision_proj 外的所有参数
