@@ -5,8 +5,10 @@ import os
 import sys
 __package__ = "trainer"
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+import gc
 import random
 import math
+import re
 import numpy as np
 import torch
 import torch.distributed as dist
