@@ -95,6 +95,7 @@ def train_epoch(epoch, loader, iters, start_step=0, wandb=None):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="MiniMind-V Pretrain")
+    parser.add_argument("--import_path", type=str, default="../out", help="导入权重路径")
     parser.add_argument("--save_dir", type=str, default="../out", help="模型保存目录")
     parser.add_argument('--save_weight', default='pretrain_vlm', type=str, help="保存权重的前缀名")
     parser.add_argument("--epochs", type=int, default=4, help="训练轮数")
