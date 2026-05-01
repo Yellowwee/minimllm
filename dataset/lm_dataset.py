@@ -113,17 +113,22 @@ class VLMDataset(IterableDataset):
         
         prompt = self.create_chat_prompt(conversations)
         input_ids = self.tokenizer(prompt).input_ids[:self.max_length]
-        input_ids += [self.tokenizer.pad_token_id] * (self.max_length - len(input_ids))
+
+        attention_mask = [1] * len(input_ids)
+        pad_len = self.max_length - len(input_ids)
+        input_ids += [self.tokenizer.pad_token_id] * pad_len
+        attention_mask += [0] * pad_len
+
         labels = self.generate_labels(input_ids)
 
-        image_tensor = torch.stack([MiniMindVLM.image2tensor(Image.open(io.BytesIO(img)), self.preprocess) for img in image_bytes])
+        image_tensor = torch.stack([MiniMindVLM.image2tensor(Image.open(io.BytesIO(img)), self.preprocess).squeeze(0) for img in image_bytes])
         # # === 调试打印 ===
         # print(f"\n--- Sample {index} ---")
         # for i, (x, y) in enumerate(zip(input_ids[:-1], labels[1:])):
         #     print(f"{i:3d}: X={self.tokenizer.decode([x])!r:16s} ---> Y={self.tokenizer.decode([input_ids[i+1]])!r:16s} label={y}")
         # # ================
 
-        return torch.tensor(input_ids, dtype=torch.long), torch.tensor(labels, dtype=torch.long), image_tensor
+        return torch.tensor(input_ids, dtype=torch.long), torch.tensor(labels, dtype=torch.long), torch.tensor(attention_mask, dtype=torch.long), image_tensor
 
     def __iter__(self):
         worker_info = get_worker_info()

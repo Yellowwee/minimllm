@@ -132,17 +132,17 @@ if __name__ == "__main__":
     parser.add_argument('--save_weight', default='sft_vlm', type=str, help="保存权重的前缀名")
     parser.add_argument("--epochs", type=int, default=2, help="训练轮数")
     parser.add_argument("--batch_size", type=int, default=4, help="batch size")
-    parser.add_argument("--learning_rate", type=float, default=1e-6, help="初始学习率")
+    parser.add_argument("--learning_rate", type=float, default=2e-5, help="初始学习率")
     parser.add_argument("--device", type=str, default="cuda:0" if torch.cuda.is_available() else "cpu", help="训练设备")
     parser.add_argument("--dtype", type=str, default="bfloat16", help="混合精度类型")
-    parser.add_argument("--num_workers", type=int, default=8, help="数据加载线程数")
+    parser.add_argument("--num_workers", type=int, default=2, help="数据加载线程数")
     parser.add_argument("--accumulation_steps", type=int, default=4, help="梯度累积步数")
     parser.add_argument("--grad_clip", type=float, default=1.0, help="梯度裁剪阈值")
     parser.add_argument("--log_interval", type=int, default=100, help="日志打印间隔")
     parser.add_argument("--save_interval", type=int, default=1000, help="模型保存间隔")
     parser.add_argument('--hidden_size', default=768, type=int, help="隐藏层维度")
     parser.add_argument('--num_hidden_layers', default=8, type=int, help="隐藏层数量")
-    parser.add_argument('--max_seq_len', default=1536, type=int, help="训练的最大截断长度")
+    parser.add_argument('--max_seq_len', default=1024, type=int, help="训练的最大截断长度")
     parser.add_argument('--use_moe', default=0, type=int, choices=[0, 1], help="是否使用MoE架构（0=否，1=是）")
     parser.add_argument("--data_path", type=str, default="../dataset/sft_i2t.parquet", help="训练数据路径")
     parser.add_argument('--from_weight', default='pretrain_vlm', type=str, help="基于哪个权重训练，为none则不基于任何权重训练")
@@ -237,6 +237,13 @@ if __name__ == "__main__":
 
         if is_iterable_ds:
             loader = DataLoader(train_ds, batch_size=args.batch_size, num_workers=args.num_workers, pin_memory=True)
+
+            batch = next(iter(loader))
+            input_ids, labels, attention_mask, pixel_values = batch
+            print("valid ratio:", (labels != -100).float().mean().item())
+            print("attention valid ratio:", attention_mask.float().mean().item())
+            print("valid labels:", (labels != -100).sum().item())
+            
             if skip > 0:
                 Logger(f'Epoch [{epoch + 1}/{args.epochs}]: 流式数据模式，跳过前{start_step}个step，从step {start_step + 1}开始')
                 train_epoch(epoch, loader, len(loader), start_step, wandb)
