@@ -59,17 +59,18 @@ def train_epoch(epoch, loader, iters, start_step=0, wandb=None):
             except StopIteration:
                 Logger(f'Epoch [{epoch + 1}/{args.epochs}] 可用batch不足，无法从step {start_step + 1}恢复，已跳过本轮。')
                 return
-    for step, (input_ids, labels, pixel_values) in enumerate(data_iter, start=start_step + 1):
+    for step, (input_ids, labels, attention_mask, pixel_values) in enumerate(data_iter, start=start_step + 1):
         last_step = step
         input_ids = input_ids.to(args.device)
         labels = labels.to(args.device)
+        attention_mask = attention_mask.to(args.device)
         pixel_values = pixel_values.to(args.device)
         lr = get_lr(epoch * iters + step, args.epochs * iters, args.learning_rate)
         for param_group in optimizer.param_groups:
             param_group['lr'] = lr
 
         with autocast_ctx:
-            res = model(input_ids, labels=labels, pixel_values=pixel_values)
+            res = model(input_ids, labels=labels, attention_mask=attention_mask, pixel_values=pixel_values)
             loss = res.loss + res.aux_loss
             loss = loss / args.accumulation_steps
 
