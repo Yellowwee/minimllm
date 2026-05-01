@@ -2,6 +2,7 @@
 #                                             MiniMind Config
 # 📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘
 
+from typing import Optional, Tuple, List, Union
 from transformers import PretrainedConfig
 try:
     from .CrossAttentionGQA import CrossAttentionGQA
@@ -40,6 +41,11 @@ class MiniMindConfig(PretrainedConfig):
             aux_loss_alpha: float = 0.01,
             seq_aux: bool = True,
             norm_topk_prob: bool = True,
+            alignment_type: str = 'none',
+            cross_attn_layers: Optional[Union[str, List[int], Tuple[int, ...]]] = None,
+            cross_attn_every: int = 2,
+            cross_attn_start_layer: Optional[int] = None,
+            cross_attn_gate_init: float = 0.1,
             **kwargs
     ):
         super().__init__(**kwargs)
@@ -79,6 +85,11 @@ class MiniMindConfig(PretrainedConfig):
         self.aux_loss_alpha = aux_loss_alpha  # 辅助损失的alpha参数
         self.seq_aux = seq_aux  # 是否在序列级别上计算辅助损失
         self.norm_topk_prob = norm_topk_prob  # 是否标准化top-k概率
+        self.alignment_type = alignment_type
+        self.cross_attn_layers = cross_attn_layers
+        self.cross_attn_every = cross_attn_every
+        self.cross_attn_start_layer = cross_attn_start_layer
+        self.cross_attn_gate_init = cross_attn_gate_init
 
 
 # 📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘📘
@@ -91,7 +102,6 @@ import torch.nn.init as init
 import torch.nn.functional as F
 from torch import nn
 from transformers.activations import ACT2FN
-from typing import Optional, Tuple, List, Union
 from transformers import PreTrainedModel, GenerationMixin, PretrainedConfig
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
@@ -148,6 +158,35 @@ def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
     return (
         x[:, :, :, None, :].expand(bs, slen, num_key_value_heads, n_rep, head_dim).reshape(bs, slen, num_key_value_heads * n_rep, head_dim)
     )
+
+
+def resolve_cross_attn_layers(config: MiniMindConfig):
+    if getattr(config, 'alignment_type', 'none') != 'cross_attn':
+        return set()
+
+    layers = getattr(config, 'cross_attn_layers', None)
+    num_layers = config.num_hidden_layers
+    if layers is None:
+        start = getattr(config, 'cross_attn_start_layer', None)
+        if start is None:
+            start = num_layers // 2
+        every = max(1, int(getattr(config, 'cross_attn_every', 2) or 1))
+        return set(range(start, num_layers, every))
+
+    if isinstance(layers, str):
+        layer_spec = layers.strip().lower()
+        if layer_spec in ('', 'none'):
+            return set()
+        if layer_spec == 'all':
+            return set(range(num_layers))
+        if layer_spec in ('upper', 'upper_half'):
+            return set(range(num_layers // 2, num_layers))
+        if layer_spec.startswith('every_'):
+            every = max(1, int(layer_spec.split('_', 1)[1]))
+            return set(range(0, num_layers, every))
+        layers = [int(item.strip()) for item in layer_spec.split(',') if item.strip()]
+
+    return {int(layer_id) for layer_id in layers if 0 <= int(layer_id) < num_layers}
 
 
 class Attention(nn.Module):
@@ -363,15 +402,23 @@ class MiniMindBlock(nn.Module):
         self.hidden_size = config.hidden_size
         self.head_dim = config.hidden_size // config.num_attention_heads
         self.self_attn = Attention(config)
-        self.cross_attn = CrossAttentionGQA(self.hidden_size, self.num_attention_heads, config.num_key_value_heads)
-        self.cross_attn_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.has_cross_attn = layer_id in resolve_cross_attn_layers(config)
+        if self.has_cross_attn:
+            self.cross_attn = CrossAttentionGQA(
+                self.hidden_size,
+                self.num_attention_heads,
+                config.num_key_value_heads,
+                gate_init=getattr(config, 'cross_attn_gate_init', 0.1)
+            )
+            self.cross_attn_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
         self.layer_id = layer_id
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.mlp = FeedForward(config) if not config.use_moe else MOEFeedForward(config)
 
-    def forward(self, hidden_states, vision_states, position_embeddings, past_key_value=None, use_cache=False, attention_mask=None):
+    def forward(self, hidden_states, vision_states, position_embeddings, past_key_value=None,
+                use_cache=False, attention_mask=None, vision_attention_mask=None):
         residual = hidden_states
         hidden_states, present_key_value = self.self_attn(
             self.input_layernorm(hidden_states), position_embeddings,
@@ -379,10 +426,13 @@ class MiniMindBlock(nn.Module):
         )
         hidden_states += residual
 
-        if vision_states is not None:
+        if self.has_cross_attn and vision_states is not None:
             residual = hidden_states
-            #应该将text 和 image进行归一化
-            cross_out = self.cross_attn(self.cross_attn_norm(hidden_states), vision_states)
+            cross_out = self.cross_attn(
+                self.cross_attn_norm(hidden_states),
+                vision_states,
+                vision_attention_mask=vision_attention_mask
+            )
             hidden_states = residual + cross_out
 
         hidden_states = hidden_states + self.mlp(self.post_attention_layernorm(hidden_states))
@@ -407,16 +457,23 @@ class MiniMindModel(nn.Module):
 
     def forward(self,
                 input_ids: Optional[torch.Tensor] = None,
+                inputs_embeds: Optional[torch.Tensor] = None,
                 attention_mask: Optional[torch.Tensor] = None,
+                vision_states: Optional[torch.Tensor] = None,
+                vision_attention_mask: Optional[torch.Tensor] = None,
                 past_key_values: Optional[List[Tuple[torch.Tensor, torch.Tensor]]] = None,
                 use_cache: bool = False,
                 **kwargs):
-        batch_size, seq_length = input_ids.shape
+        if inputs_embeds is None:
+            batch_size, seq_length = input_ids.shape
+            hidden_states = self.dropout(self.embed_tokens(input_ids))
+        else:
+            batch_size, seq_length, _ = inputs_embeds.shape
+            hidden_states = self.dropout(inputs_embeds)
+
         if hasattr(past_key_values, 'layers'): past_key_values = None
         past_key_values = past_key_values or [None] * len(self.layers)
         start_pos = past_key_values[0][0].shape[1] if past_key_values[0] is not None else 0
-
-        hidden_states = self.dropout(self.embed_tokens(input_ids))
 
         position_embeddings = (
             self.freqs_cos[start_pos:start_pos + seq_length],
@@ -427,11 +484,12 @@ class MiniMindModel(nn.Module):
         for layer_idx, (layer, past_key_value) in enumerate(zip(self.layers, past_key_values)):
             hidden_states, present = layer(
                 hidden_states,
-                vision_states=None,
+                vision_states=vision_states,
                 position_embeddings=position_embeddings,
                 past_key_value=past_key_value,
                 use_cache=use_cache,
-                attention_mask=attention_mask
+                attention_mask=attention_mask,
+                vision_attention_mask=vision_attention_mask
             )
             presents.append(present)
 

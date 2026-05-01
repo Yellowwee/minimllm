@@ -141,6 +141,11 @@ def init_vlm_model(vlm_config, from_weight='llm', tokenizer_path='../model',
 
     model.vision_encoder, model.processor = MiniMindVLM.get_vision_model(vision_model_path)
     preprocess = model.processor
+    if preprocess is None:
+        raise RuntimeError(
+            f'CLIP processor加载失败，vision_model_path={vision_model_path!r}。'
+            '请检查 --clip_path 是否指向本地 clip-vit-base-patch16 目录。'
+        )
     return model.to(device), tokenizer, preprocess
 
 
@@ -154,8 +159,8 @@ def vlm_checkpoint(vlm_config, weight='pretrain_vlm', model=None, optimizer=None
         raw_model = model.module if isinstance(model, DistributedDataParallel) else model
         raw_model = getattr(raw_model, '_orig_mod', raw_model)
         state_dict = raw_model.state_dict()
-        # 移除vision_encoder参数（不需要保存，因为是预训练的）
-        clean_state_dict = {k: v for k, v in state_dict.items() if not k.startswith('vision_encoder.')}
+        # 移除vision_encoder参数（不需要保存，因为是预训练的；PEFT包装后key可能带前缀）
+        clean_state_dict = {k: v for k, v in state_dict.items() if 'vision_encoder.' not in k}
         ckp_tmp = ckp_path + '.tmp'
         torch.save({k: v.half().cpu() for k, v in clean_state_dict.items()}, ckp_tmp)
         os.replace(ckp_tmp, ckp_path)
@@ -169,7 +174,7 @@ def vlm_checkpoint(vlm_config, weight='pretrain_vlm', model=None, optimizer=None
                 wandb_id = getattr(wandb, 'id', None)
         
         resume_data = {
-            'model': state_dict,
+            'model': clean_state_dict,
             'optimizer': optimizer.state_dict(),
             'epoch': epoch,
             'step': step,

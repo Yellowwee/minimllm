@@ -12,7 +12,7 @@ import torch.distributed as dist
 from contextlib import nullcontext
 from torch import optim, nn
 from torch.nn.parallel import DistributedDataParallel
-from torch.utils.data import DataLoader, DistributedSampler
+from torch.utils.data import DataLoader, DistributedSampler, IterableDataset
 from transformers import AutoTokenizer
 from model.model_vlm import MiniMindVLM, VLMConfig
 from dataset.lm_dataset import VLMDataset
@@ -113,13 +113,19 @@ if __name__ == "__main__":
     parser.add_argument('--max_seq_len', default=640, type=int, help="训练的最大截断长度")
     parser.add_argument('--use_moe', default=0, type=int, choices=[0, 1], help="是否使用MoE架构（0=否，1=是）")
     parser.add_argument("--data_path", type=str, default="../dataset/pretrain_i2t.parquet", help="训练数据路径")
-    parser.add_argument('--from_weight', default='llm', type=str, help="基于哪个权重训练，为none则不基于任何权重训练")
-    parser.add_argument('--from_resume', default=0, type=int, choices=[0, 1], help="是否自动检测&续训（0=否，1=是）")
+    parser.add_argument('--from_weight', default='llm', type=str, help="基于哪个权重训练")
+    parser.add_argument('--from_resume', default=0, type=int, choices=[0, 1], help="是否从指定resume_path续训（0=否，1=是）")
+    parser.add_argument('--resume_path', type=str, default=None, help="显式指定续训文件路径，例如 ../checkpoints/pretrain_vlm_768_resume.pth")
     parser.add_argument('--freeze_llm', default=1, type=int, choices=[0, 1], help="是否冻结LLM参数（0=否，1=是，仅训练vision_proj）")
     parser.add_argument("--use_compile", default=0, type=int, choices=[0, 1], help="是否使用torch.compile加速（0=否，1=是）")
     parser.add_argument("--use_wandb", action="store_true", help="是否使用wandb")
     parser.add_argument("--wandb_project", type=str, default="MiniMind-V-Pretrain", help="wandb项目名")
-    parser.add_argument("--clip_path", type=str, default="../model/vision_model/clip", help="本地or云端训练")
+    parser.add_argument("--clip_path", type=str, default="../model/vision_model/clip-vit-base-patch16", help="CLIP视觉模型路径")
+    parser.add_argument("--alignment_type", type=str, default="cross_attn", choices=["cross_attn", "token"], help="视觉对齐方式")
+    parser.add_argument("--cross_attn_layers", type=str, default=None, help="交叉注意力层: all/upper_half/every_2/逗号分隔层号")
+    parser.add_argument("--cross_attn_every", type=int, default=2, help="未指定cross_attn_layers时，每隔多少层插入交叉注意力")
+    parser.add_argument("--cross_attn_start_layer", type=int, default=None, help="未指定cross_attn_layers时，从第几层开始插入")
+    parser.add_argument("--cross_attn_gate_init", type=float, default=0.1, help="交叉注意力sigmoid门控初值")
     args = parser.parse_args()
 
     # ========== 1. 初始化环境和随机种子 ==========
@@ -129,9 +135,23 @@ if __name__ == "__main__":
     
     # ========== 2. 配置目录、模型参数、检查ckp ==========
     os.makedirs(args.save_dir, exist_ok=True)
+    if args.resume_path is not None:
+        args.resume_path = args.resume_path if os.path.isabs(args.resume_path) else os.path.abspath(os.path.join(os.path.dirname(__file__), args.resume_path))
     vlm_config = VLMConfig(hidden_size=args.hidden_size, num_hidden_layers=args.num_hidden_layers, 
-                           max_seq_len=args.max_seq_len, use_moe=bool(args.use_moe))
-    ckp_data = vlm_checkpoint(vlm_config, weight=args.save_weight, save_dir='../checkpoints') if args.from_resume==1 else None
+                           max_seq_len=args.max_seq_len, use_moe=bool(args.use_moe),
+                           alignment_type=args.alignment_type,
+                           cross_attn_layers=args.cross_attn_layers,
+                           cross_attn_every=args.cross_attn_every,
+                           cross_attn_start_layer=args.cross_attn_start_layer,
+                           cross_attn_gate_init=args.cross_attn_gate_init)
+    if args.from_resume == 1:
+        if not args.resume_path:
+            raise ValueError("--from_resume 1 时必须显式指定 --resume_path，例如 ../checkpoints/pretrain_vlm_768_resume.pth")
+        if not os.path.exists(args.resume_path):
+            raise FileNotFoundError(f"找不到续训文件: {args.resume_path}")
+        ckp_data = torch.load(args.resume_path, map_location='cpu')
+    else:
+        ckp_data = None
     
     # ========== 3. 设置混合精度 ==========
     device_type = "cuda" if "cuda" in args.device else "cpu"
@@ -182,12 +202,38 @@ if __name__ == "__main__":
         setup_seed(42 + epoch); indices = torch.randperm(len(train_ds)).tolist()
         skip = start_step if (epoch == start_epoch and start_step > 0) else 0
         batch_sampler = SkipBatchSampler(train_sampler or indices, args.batch_size, skip)
-        loader = DataLoader(train_ds, batch_sampler=batch_sampler, num_workers=args.num_workers, pin_memory=True)
-        if skip > 0: 
-            Logger(f'Epoch [{epoch + 1}/{args.epochs}]: 跳过前{start_step}个step，从step {start_step + 1}开始')
-            train_epoch(epoch, loader, len(loader) + skip, start_step, wandb)
+        loader = DataLoader(train_ds, batch_size=args.batch_size, num_workers=args.num_workers, pin_memory=True)
+
+        is_iterable = isinstance(train_ds, IterableDataset)
+        if is_iterable:
+            if skip > 0: 
+                Logger("IterableDataset do not support batch_sampler.")
+            loader = DataLoader(
+                train_ds,
+                batch_size=args.batch_size,
+                num_workers=args.num_workers,
+                pin_memory=True
+            )
+            iters = len(loader) if hasattr(train_ds, "__len__")  else  1000
+            train_epoch(epoch, loader, iters, 0, wandb)
         else:
-            train_epoch(epoch, loader, len(loader), 0, wandb)
+            setup_seed(42 + epoch)
+            indices = torch.randperm(len(train_ds)).tolist()
+            skip = start_step if (epoch == start_epoch and start_step > 0) else 0
+            batch_sampler = SkipBatchSampler(train_sampler or indices, args.batch_size, skip)
+
+            loader = DataLoader(
+                train_ds,
+                batch_sampler=batch_sampler,
+                num_workers=args.num_workers,
+                pin_memory=True
+            )
+
+            if skip > 0:
+                Logger(f'Epoch [{epoch + 1}/{args.epochs}]: 跳过前{start_step}个step，从step {start_step + 1}开始')
+                train_epoch(epoch, loader, len(loader) + skip, start_step, wandb)
+            else:
+                train_epoch(epoch, loader, len(loader), 0, wandb)
     
     # ========== 9. 清理分布进程 ==========
     if dist.is_initialized(): dist.destroy_process_group()
